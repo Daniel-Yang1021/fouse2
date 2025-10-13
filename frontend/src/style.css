@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* 隱藏所有 scrollbar */
+* {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE and Edge */
+}
+
+*::-webkit-scrollbar {
+  display: none; /* Chrome, Safari and Opera */
+}
+
+html, body {
+  overflow: hidden; /* 防止整個頁面出現 scrollbar */
+}
+
+#app {
+  overflow: hidden;
+}
