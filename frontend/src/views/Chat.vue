@@ -187,6 +187,9 @@ const nextVideo = ref<string>("");
 
 const isEndingConsult = ref(false);
 const isInterrupted = ref(false);  // 標記是否已被打斷
+const isInterrupting = ref(false);  // 標記是否正在處理打斷
+const videoStateLocked = ref(false);  // 影片狀態鎖定
+const INTERRUPT_COOLDOWN = 500;  // 打斷冷卻時間（毫秒）
 
 // 判斷是否應顯示打斷按鈕（思考中或AI回應中）
 const shouldShowInterruptButton = computed(() => {
@@ -208,7 +211,8 @@ const disableInterruptButton = computed(() => {
   return (
     isRecording.value ||
     isAIResponding.value ||
-    isEndingConsult.value
+    isEndingConsult.value ||
+    isInterrupting.value  // 打斷處理中時也禁用按鈕
   );
 });
 
@@ -238,6 +242,7 @@ const inactivityTimer = ref<number | null>(null);
 const followupTimer = ref<number | null>(null);
 const farewellTimer = ref<number | null>(null);
 const notifyEventsInterval = ref<number | null>(null);
+const notifyCheckCancelled = ref(false);  // 標記是否取消 notify events 輪詢
 const lastProcessedTimestamp = ref<string>("");
 const isProcessing = ref(false);
 const isSpeakingLocked = ref(false);  // 鎖定 isSpeaking，防止提前切換
@@ -269,10 +274,22 @@ const END_DIALOG_TIMEOUT = 15 * 1000;
 
 // 檢查通知事件
 async function checkNotifyEvents() {
+  // 在處理前檢查是否已取消
+  if (notifyCheckCancelled.value) {
+    console.log('⚠️ Notify events 輪詢已取消，跳過檢查');
+    return;
+  }
+
   try {
     console.log('檢查通知事件, sessionId:', sessionId);
     const response = await chatApi.getNotifyEvents(sessionId);
     console.log('Notify events response:', response);
+
+    // 在處理事件前再次檢查是否已取消
+    if (notifyCheckCancelled.value) {
+      console.log('⚠️ 事件處理已取消，停止處理');
+      return;
+    }
 
     if (response.code === 0 && response.data && response.data.length > 0) {
       // 按timestamp排序，確保順序處理
@@ -341,6 +358,7 @@ async function checkNotifyEvents() {
 
 // 開始輪詢通知事件
 function startNotifyCheck() {
+  notifyCheckCancelled.value = false;  // 重置取消標記
   if (!notifyEventsInterval.value) {
     checkNotifyEvents();
     notifyEventsInterval.value = window.setInterval(checkNotifyEvents, 100);  // 縮短到 100ms 提升響應速度
@@ -349,10 +367,12 @@ function startNotifyCheck() {
 
 // 停止輪詢通知事件
 function stopNotifyCheck() {
+  notifyCheckCancelled.value = true;  // 設置取消標記
   if (notifyEventsInterval.value) {
     clearInterval(notifyEventsInterval.value);
     notifyEventsInterval.value = null;
   }
+  console.log('✅ 已停止 notify events 輪詢');
   // 不重置 lastProcessedTimestamp，避免重複處理舊事件
 }
 
@@ -648,6 +668,15 @@ async function handleRecordingClick() {
 async function handleEndConsult(isTimeout: boolean = false, showEndDialog: boolean = true) {
   try {
     console.log('handleEndConsult 被調用, isTimeout:', isTimeout, 'showEndDialog:', showEndDialog);
+
+    // 如果 AI 正在說話或處理中，先觸發打斷
+    if (isProcessing.value || isAIResponding.value || isSpeaking.value) {
+      console.log('⚠️ AI 正在說話或處理中，重啟對話前先執行打斷');
+      await handleInterrupt();
+      // 等待打斷完成後再繼續
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
     clearAllTimers();
     document.removeEventListener("click", handleClick);
     clearDialogHistory();
@@ -875,15 +904,43 @@ async function handleShowInfo() {
 }
 
 async function handleInterrupt() {
+  // 防抖動：如果正在處理打斷，直接返回
+  if (isInterrupting.value) {
+    console.log('⚠️ 正在處理打斷，忽略重複請求');
+    return;
+  }
+
   console.log('🛑 執行打斷對話');
 
   try {
+    // 設置打斷處理標記
+    isInterrupting.value = true;
+
     // 設置打斷標記，阻止 transcribe 後續操作
     isInterrupted.value = true;
     console.log('✅ 已設置打斷標記');
 
+    // 鎖定影片狀態
+    videoStateLocked.value = true;
+    console.log('✅ 已鎖定影片狀態');
+
+    // 立即停止所有影片相關操作
+    const currentVideoRef = showVideo1.value ? videoRef1.value : videoRef2.value;
+    if (currentVideoRef) {
+      currentVideoRef.pause();
+      currentVideoRef.currentTime = 0;
+      console.log('✅ 已暫停並重置本地影片');
+    }
+
+    // 強制停止串流影片
+    if (videoStreamRef.value) {
+      videoStreamRef.value.setMuted(true);
+      console.log('✅ 已將串流影片靜音');
+    }
+
     // 發送打斷請求到後端
     await chatApi.sendInterruptMessage(sessionId);
+    console.log('✅ 已發送打斷請求到後端');
 
     // 停止輪詢 notify events
     stopNotifyCheck();
@@ -903,12 +960,6 @@ async function handleInterrupt() {
     clearDialogHistory();
     console.log('✅ 已清空對話歷史');
 
-    // 將串流影片靜音（防止繼續播放聲音）
-    if (videoStreamRef.value) {
-      videoStreamRef.value.setMuted(true);
-      console.log('✅ 已將串流影片靜音');
-    }
-
     // 重置狀態
     isProcessing.value = false;
     isAIResponding.value = false;
@@ -919,20 +970,31 @@ async function handleInterrupt() {
     firstFlag.value = true;  // 重置 firstFlag，防止倒數計時被觸發
     console.log('✅ 已重置狀態，切換回待機影片，isSpeaking 已解鎖，已重置 firstFlag');
 
-    // 確保待機影片正在播放
-    const currentVideoRef = showVideo1.value ? videoRef1.value : videoRef2.value;
-    if (currentVideoRef) {
-      if (currentVideoRef.paused) {
+    // 延遲解鎖影片狀態，確保狀態已穩定
+    setTimeout(() => {
+      videoStateLocked.value = false;
+      console.log('✅ 已解鎖影片狀態');
+
+      // 確保待機影片正在播放
+      const currentVideoRef = showVideo1.value ? videoRef1.value : videoRef2.value;
+      if (currentVideoRef) {
+        currentVideoRef.src = getNextVideo();
         currentVideoRef.play().catch((error) => {
           console.error('播放待機影片失敗:', error);
         });
+        console.log('✅ 已重新啟動待機影片播放');
       }
-      console.log('✅ 已啟動待機影片播放');
-    }
+    }, 300);
 
     console.log('✅ 打斷對話完成，已回到待機狀態，不會觸發倒數計時');
   } catch (error) {
     console.error('❌ 打斷對話時發生錯誤:', error);
+  } finally {
+    // 設置冷卻時間，防止過快連續打斷
+    setTimeout(() => {
+      isInterrupting.value = false;
+      console.log('✅ 打斷冷卻時間結束，可以再次打斷');
+    }, INTERRUPT_COOLDOWN);
   }
 }
 </script>
