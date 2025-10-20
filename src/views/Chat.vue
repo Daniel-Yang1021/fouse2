@@ -14,6 +14,7 @@
           :is-consulting="isConsulting"
           :formatted-time="formattedTime"
           :disabled="disableAllButtons"
+          :disable-info-button="isInfoButtonOnCooldown || disableAllButtons"
           :show-interrupt="shouldShowInterruptButton"
           @consult-click="handleConsultClick"
           @recording-click="handleRecordingClick"
@@ -190,6 +191,8 @@ const isInterrupted = ref(false);  // 標記是否已被打斷
 const isInterrupting = ref(false);  // 標記是否正在處理打斷
 const videoStateLocked = ref(false);  // 影片狀態鎖定
 const INTERRUPT_COOLDOWN = 500;  // 打斷冷卻時間（毫秒）
+const isInfoButtonOnCooldown = ref(false);  // Info 按鈕冷卻標記
+const INFO_BUTTON_COOLDOWN = 10000;  // Info 按鈕冷卻時間（毫秒）10秒
 
 // 判斷是否應顯示打斷按鈕（思考中或AI回應中）
 const shouldShowInterruptButton = computed(() => {
@@ -281,9 +284,7 @@ async function checkNotifyEvents() {
   }
 
   try {
-    console.log('檢查通知事件, sessionId:', sessionId);
     const response = await chatApi.getNotifyEvents(sessionId);
-    console.log('Notify events response:', response);
 
     // 在處理事件前再次檢查是否已取消
     if (notifyCheckCancelled.value) {
@@ -358,11 +359,18 @@ async function checkNotifyEvents() {
 
 // 開始輪詢通知事件
 function startNotifyCheck() {
-  notifyCheckCancelled.value = false;  // 重置取消標記
-  if (!notifyEventsInterval.value) {
-    checkNotifyEvents();
-    notifyEventsInterval.value = window.setInterval(checkNotifyEvents, 100);  // 縮短到 100ms 提升響應速度
-  }
+  // 先停止現有的輪詢（如果有）
+  stopNotifyCheck();
+
+  // 立即更新時間戳為當前時間，忽略所有舊事件
+  const currentTimestamp = new Date().toISOString();
+  lastProcessedTimestamp.value = currentTimestamp;
+  console.log('✅ 開始新的 notify events 輪詢，時間戳重置為:', currentTimestamp);
+
+  // 重置取消標記並啟動新的輪詢
+  notifyCheckCancelled.value = false;
+  checkNotifyEvents();
+  notifyEventsInterval.value = window.setInterval(checkNotifyEvents, 100);  // 縮短到 100ms 提升響應速度
 }
 
 // 停止輪詢通知事件
@@ -608,10 +616,6 @@ async function handleRecordingClick() {
         // 播放思考影片，同時處理轉錄
         const thinkingPromise = playThinkingVideo();
 
-        // 立即開始輪詢 notify events（不等待轉錄完成）
-        console.log('播放思考影片，立即開始輪詢 notify events');
-        startNotifyCheck();
-
         const transcribePromise = handleTranscribeResult(
           audioBlob,
           () => {
@@ -623,7 +627,12 @@ async function handleRecordingClick() {
             videoStreamRef.value?.setMuted(false);
             return true;  // 返回 true 或 undefined 表示繼續
           },
-          userId.value
+          userId.value,
+          () => {
+            // human API 發送完成後開始輪詢
+            console.log('錄音轉錄完成，Human API 已發送，開始輪詢 notify events');
+            startNotifyCheck();
+          }
         );
 
         // 等待思考影片和轉錄都完成
@@ -717,6 +726,22 @@ async function handleEndConsult(isTimeout: boolean = false, showEndDialog: boole
 
 async function handleSendMessage(message: string) {
   try {
+    // 防呆機制：如果 Info 按鈕在冷卻中，忽略發送請求
+    if (isInfoButtonOnCooldown.value) {
+      console.log('⚠️ Info 按鈕冷卻中，忽略發送請求（防止快速連續點擊）');
+      return;
+    }
+
+    // 設置 Info 按鈕冷卻，防止快速連續發送
+    isInfoButtonOnCooldown.value = true;
+    console.log('✅ Info 訊息已發送，進入 10 秒冷卻狀態');
+
+    // 設置冷卻時間
+    setTimeout(() => {
+      isInfoButtonOnCooldown.value = false;
+      console.log('✅ Info 按鈕冷卻結束，可以再次發送訊息');
+    }, INFO_BUTTON_COOLDOWN);
+
     clearAllTimers();
     isInterrupted.value = false;  // 重置打斷標記
     firstFlag.value = false;  // 允許後續啟動倒數計時
@@ -747,6 +772,10 @@ async function handleSendMessage(message: string) {
     await Promise.all([thinkingPromise, textPromise]);
     // isProcessing 會在收到 start 事件時設為 false
   } catch (error: any) {
+    // 發生錯誤時解除冷卻
+    isInfoButtonOnCooldown.value = false;
+    console.log('❌ 發生錯誤，Info 按鈕冷卻已解除');
+
     isProcessing.value = false;
     isAIResponding.value = false;
     stopNotifyCheck();
@@ -878,7 +907,7 @@ onBeforeUnmount(() => {
 function handleGlobalClick() {
   // 所有點擊都會被 @click.prevent 阻止
   // 只有使用 @click.stop 的子元素才能正常響應點擊
-  console.log('🚫 全局點擊被攔截');
+  // console.log('🚫 全局點擊被攔截');  // 減少輸出
 }
 
 // 隱藏重新整理功能（Header 圖片「會」字位置）
@@ -891,7 +920,7 @@ function handleReload() {
 async function handleShowInfo() {
   // 檢查是否正在思考或 AI 正在說話
   if (isProcessing.value || isAIResponding.value || isSpeaking.value) {
-    console.log('⚠️ 正在思考或說話中，點擊 info 按鈕觸發打斷');
+    console.log('⚠️ 正在思考或說話中，點擊 Info 按鈕觸發打斷');
     await handleInterrupt();
     // 打斷完成後，延遲一小段時間再顯示 InfoBox（確保狀態已重置）
     setTimeout(() => {
@@ -919,6 +948,10 @@ async function handleInterrupt() {
     // 設置打斷標記，阻止 transcribe 後續操作
     isInterrupted.value = true;
     console.log('✅ 已設置打斷標記');
+
+    // 立即鎖定 isSpeaking，防止後端狀態干擾前端
+    isSpeakingLocked.value = true;
+    console.log('✅ 已鎖定 isSpeaking 狀態');
 
     // 鎖定影片狀態
     videoStateLocked.value = true;
@@ -966,11 +999,10 @@ async function handleInterrupt() {
     isEndingConsult.value = false;
     showStreamVideo.value = false;  // 切換回待機影片
     showInfoBox.value = false;
-    isSpeakingLocked.value = false;  // 強制停止說話狀態
     firstFlag.value = true;  // 重置 firstFlag，防止倒數計時被觸發
-    console.log('✅ 已重置狀態，切換回待機影片，isSpeaking 已解鎖，已重置 firstFlag');
+    console.log('✅ 已重置狀態，切換回待機影片，已重置 firstFlag');
 
-    // 延遲解鎖影片狀態，確保狀態已穩定
+    // 延遲解鎖影片狀態和 isSpeaking，確保後端已完全停止
     setTimeout(() => {
       videoStateLocked.value = false;
       console.log('✅ 已解鎖影片狀態');
@@ -985,6 +1017,12 @@ async function handleInterrupt() {
         console.log('✅ 已重新啟動待機影片播放');
       }
     }, 300);
+
+    // 延遲更長時間才解鎖 isSpeaking，確保後端數位人物已完全停止
+    setTimeout(() => {
+      isSpeakingLocked.value = false;
+      console.log('✅ 已解鎖 isSpeaking，允許後端狀態更新');
+    }, 1500);  // 延長至 1.5 秒，確保後端完全停止
 
     console.log('✅ 打斷對話完成，已回到待機狀態，不會觸發倒數計時');
   } catch (error) {
