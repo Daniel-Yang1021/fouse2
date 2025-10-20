@@ -42,16 +42,22 @@
         style="width: 1080px; height: 1263px;"
         :class="{ hidden: showStreamVideo }"
       >
+        <!-- 背景圖層，避免影片切換時閃出白底 -->
+        <img
+          src="/aikka_road_show第一幀.png"
+          alt="background"
+          style="width: 1080px; height: 1263px; object-fit: cover; position: absolute; top: 0; left: 0; z-index: 0;"
+        />
         <video
           ref="videoRef1"
-          style="width: 1080px; height: 1263px; object-fit: cover;"
+          style="width: 1080px; height: 1263px; object-fit: cover; position: absolute; top: 0; left: 0; z-index: 1;"
           :class="{ hidden: !showVideo1 }"
           playsinline
           muted
         ></video>
         <video
           ref="videoRef2"
-          style="width: 1080px; height: 1263px; object-fit: cover;"
+          style="width: 1080px; height: 1263px; object-fit: cover; position: absolute; top: 0; left: 0; z-index: 1;"
           :class="{ hidden: !showVideo2 }"
           playsinline
           muted
@@ -244,6 +250,8 @@ const showEndDialogBox = ref(false);
 const inactivityTimer = ref<number | null>(null);
 const followupTimer = ref<number | null>(null);
 const farewellTimer = ref<number | null>(null);
+const autoReloadTimer = ref<number | null>(null);  // 自動重新整理計時器
+const autoReloadCountdownInterval = ref<number | null>(null);  // 自動重新整理倒數日誌計時器
 const notifyEventsInterval = ref<number | null>(null);
 const notifyCheckCancelled = ref(false);  // 標記是否取消 notify events 輪詢
 const lastProcessedTimestamp = ref<string>("");
@@ -271,6 +279,7 @@ const {
 // const FOLLOWUP_TIMEOUT = 10 * 1000;  // 已取消倒數機制
 // const FAREWELL_TIMEOUT = 5 * 1000;
 const END_DIALOG_TIMEOUT = 15 * 1000;
+const AUTO_RELOAD_TIMEOUT = 120 * 1000;  // 自動重新整理時間：2 分鐘
 
 // const longPressTimer = ref<number | null>(null);
 // const LONG_PRESS_DURATION = 5000; // 5秒
@@ -337,6 +346,11 @@ async function checkNotifyEvents() {
         setTimeout(() => {
           console.log('延遲結束，切換回待機影片');
           showStreamVideo.value = false;  // 隱藏後端串流影片，顯示本地待機影片
+
+          // AI 說完話後，啟動自動重新整理計時器（2 分鐘後自動重整理頁面）
+          if (isConsulting.value) {
+            setAutoReloadTimer();
+          }
 
           // 如果是最後一次提示，再延遲 2 秒後結束對話
           if (isLastPrompt.value) {
@@ -450,6 +464,7 @@ function clearAllTimers() {
     countdownInterval.value = null;
   }
   stopNotifyCheck();
+  clearAutoReloadTimer();  // 清除自動重新整理計時器
   isLastPrompt.value = false;  // 重置最後提示標記
 }
 
@@ -558,6 +573,47 @@ function setInactivityTimer() {
   // }, INACTIVITY_TIMEOUT);
 }
 
+// 設置自動重新整理計時器（對話結束後 2 分鐘自動重整理頁面）
+function setAutoReloadTimer() {
+  // 先清除現有的計時器（如果有）
+  clearAutoReloadTimer();
+
+  const startTime = Date.now();
+  console.log('🔄 開始自動重新整理倒數計時：2 分鐘');
+
+  // 每 10 秒在控制台顯示剩餘時間
+  autoReloadCountdownInterval.value = window.setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const remaining = Math.ceil((AUTO_RELOAD_TIMEOUT - elapsed) / 1000);
+    if (remaining > 0) {
+      console.log(`🔄 自動重新整理倒數：${remaining} 秒`);
+    }
+  }, 10000);  // 每 10 秒顯示一次
+
+  // 2 分鐘後執行重新整理
+  autoReloadTimer.value = window.setTimeout(() => {
+    console.log('🔄 2 分鐘已到，執行自動重新整理頁面');
+    if (autoReloadCountdownInterval.value) {
+      clearInterval(autoReloadCountdownInterval.value);
+      autoReloadCountdownInterval.value = null;
+    }
+    window.location.reload();
+  }, AUTO_RELOAD_TIMEOUT);
+}
+
+// 清除自動重新整理計時器
+function clearAutoReloadTimer() {
+  if (autoReloadTimer.value) {
+    clearTimeout(autoReloadTimer.value);
+    autoReloadTimer.value = null;
+    console.log('✅ 已清除自動重新整理計時器');
+  }
+  if (autoReloadCountdownInterval.value) {
+    clearInterval(autoReloadCountdownInterval.value);
+    autoReloadCountdownInterval.value = null;
+  }
+}
+
 function showError(message: string) {
   if (errorMessage.value) {
     errorMessage.value.textContent = message;
@@ -570,6 +626,9 @@ function showError(message: string) {
 
 async function handleConsultClick() {
   try {
+    // 清除自動重新整理計時器（用戶開始對話，重置計時）
+    clearAutoReloadTimer();
+
     // 生成新的 userId
     userId.value = generateUserId();
     console.log('開始新對話, userId:', userId.value);
@@ -606,6 +665,8 @@ async function handleConsultClick() {
 
 async function handleRecordingClick() {
   try {
+    // 清除自動重新整理計時器（用戶開始錄音，重置計時）
+    clearAutoReloadTimer();
     clearAllTimers();
     if (isRecording.value) {
       isInterrupted.value = false;  // 重置打斷標記
@@ -731,6 +792,9 @@ async function handleSendMessage(message: string) {
       console.log('⚠️ Info 按鈕冷卻中，忽略發送請求（防止快速連續點擊）');
       return;
     }
+
+    // 清除自動重新整理計時器（用戶發送訊息，重置計時）
+    clearAutoReloadTimer();
 
     // 設置 Info 按鈕冷卻，防止快速連續發送
     isInfoButtonOnCooldown.value = true;
@@ -900,6 +964,7 @@ onBeforeUnmount(() => {
     clearInterval(recordingTimer.value);
   }
   clearAllTimers();
+  clearAutoReloadTimer();  // 清除自動重新整理計時器
   document.removeEventListener("click", handleClick);
 });
 
@@ -918,6 +983,9 @@ function handleReload() {
 
 // 處理顯示 InfoBox，如果在思考或說話中，先執行打斷
 async function handleShowInfo() {
+  // 清除自動重新整理計時器（用戶點擊 Info，重置計時）
+  clearAutoReloadTimer();
+
   // 檢查是否正在思考或 AI 正在說話
   if (isProcessing.value || isAIResponding.value || isSpeaking.value) {
     console.log('⚠️ 正在思考或說話中，點擊 Info 按鈕觸發打斷');
